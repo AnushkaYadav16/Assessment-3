@@ -1,1 +1,4 @@
 Assessment - 3
+
+Script.py 
+python script.py --bucket mybucket071116 --file C:\Users\anushka.yadav02\Documents\VSCODE\Assessment3\files\Salary.txt --lambda-function triggerlambda.py

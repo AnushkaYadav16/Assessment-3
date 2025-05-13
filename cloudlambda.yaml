@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  # S3 Bucket
+  MyS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref 'S3BucketName'
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'LambdaS3AccessPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${MyS3Bucket}'
+                  - !Sub 'arn:aws:s3:::${MyS3Bucket}/*'
+              - Effect: 'Allow'
+                Action:
+                  - 'logs:*'
+                Resource: '*'
+
+  # Lambda Function
+  MyLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'MyS3EventTriggerLambda'
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt 'LambdaExecutionRole.Arn'
+      Runtime: 'python3.8'
+      Code:
+        S3Bucket: !Ref 'LambdaCodeS3Bucket'
+        S3Key: !Ref 'LambdaCodeS3Key'
+
+  # S3 Event Notification to trigger Lambda
+  S3EventNotification:
+    Type: 'AWS::S3::BucketNotification'
+    Properties:
+      Bucket: !Ref 'MyS3Bucket'
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Function: !GetAtt 'MyLambdaFunction.Arn'
+
+  # Granting S3 permission to the Lambda function
+  LambdaInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref 'MyLambdaFunction'
+      Principal: 's3.amazonaws.com'
+      SourceArn: !GetAtt 'MyS3Bucket.Arn'
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: 'The name of the S3 bucket to create.'
+    
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: 'The S3 bucket where your Lambda function code is stored.'
+
+  LambdaCodeS3Key:
+    Type: String
+    Description: 'The S3 key for your Lambda function code.'
+
+Outputs:
+  LambdaFunctionArn:
+    Value: !GetAtt 'MyLambdaFunction.Arn'
+    Description: 'ARN of the Lambda function triggered by S3 events.'
+  BucketName:
+    Value: !Ref 'MyS3Bucket'
+    Description: 'The name of the S3 bucket created.'

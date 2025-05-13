@@ -1,0 +1,166 @@
+# import boto3
+# import botocore
+# from botocore.exceptions import ClientError
+# import argparse
+# import logging
+# import os
+
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# logger = logging.getLogger(__name__)
+
+# s3 = boto3.client('s3')
+# lambda_client = boto3.client('lambda')
+
+# def create_bucket(bucket_name, region):
+#     """
+#     Creates an S3 bucket if it does not exist.
+#     Returns True if the bucket was created, False if it already existed.
+#     """
+#     try:
+#         s3.head_bucket(Bucket=bucket_name)
+#         logging.info(f"Bucket '{bucket_name}' already exists.")
+#         return False
+#     except ClientError as e:
+#         if e.response['Error']['Code'] == '404':
+#             logging.info(f"Bucket '{bucket_name}' does not exist. Creating now...")
+#             s3.create_bucket(
+#                 Bucket=bucket_name,
+#                 CreateBucketConfiguration={'LocationConstraint': region}
+#             )
+#             return True
+#         else:
+#             logging.error(f"Error checking or creating bucket: {e}")
+#             raise e
+
+# def add_lambda_permission(lambda_function_name, bucket_name):
+#     """
+#     Adds permission for the S3 bucket to invoke the Lambda function.
+#     """
+#     try:
+#         response = lambda_client.add_permission(
+#             FunctionName=lambda_function_name,
+#             StatementId='s3invoke-permission', 
+#             Action='lambda:InvokeFunction',
+#             Principal='s3.amazonaws.com',
+#             SourceArn=f'arn:aws:s3:::{bucket_name}'
+#         )
+#         logger.info(f"Permission added for S3 to invoke Lambda function '{lambda_function_name}'.")
+#     except botocore.exceptions.ClientError as e:
+#         if e.response['Error']['Code'] == 'ResourceConflictException':
+#             logger.warning("Permission already exists. Skipping add_permission.")
+#         else:
+#             logger.error(f"Failed to add permission: {e}")
+#             raise
+
+# def configure_s3_event_notification(bucket_name, lambda_function_arn):
+#     """
+#     Configures the S3 bucket to trigger the Lambda function on object creation events.
+#     """
+#     try:
+#         s3.put_bucket_notification_configuration(
+#             Bucket=bucket_name,
+#             NotificationConfiguration={
+#                 'LambdaFunctionConfigurations': [
+#                     {
+#                         'LambdaFunctionArn': lambda_function_arn,
+#                         'Events': ['s3:ObjectCreated:*'],
+#                     },
+#                 ]
+#             }
+#         )
+#         logger.info(f"S3 event notification configured to trigger Lambda function '{lambda_function_arn}' on object upload.")
+#     except botocore.exceptions.ClientError as e:
+#         logger.error(f"Failed to configure S3 event notification: {e}")
+#         raise
+
+# def upload_file(s3_client, bucket_name, file_path):
+#     file_name = os.path.basename(file_path)
+#     try:
+#         s3_client.upload_file(file_path, bucket_name, file_name)
+#         logger.info(f"File '{file_name}' uploaded successfully to bucket '{bucket_name}'.")
+#     except botocore.exceptions.ClientError as e:
+#         logger.error(f"Failed to upload file '{file_name}' to bucket '{bucket_name}': {e}")
+#         raise
+
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser(description="Create an S3 bucket, add Lambda invoke permission, and upload a file.")
+#     parser.add_argument('--bucket', required=True, help='S3 bucket name')
+#     parser.add_argument('--file', required=True, help='Path to the file to upload')
+#     parser.add_argument('--lambda-function', required=True, help='Name of the Lambda function to invoke on upload')
+
+#     args = parser.parse_args()
+#     bucket_name = args.bucket
+#     file_path = args.file
+#     lambda_function_name = args.lambda_function
+#     lambda_function_arn = f'arn:aws:lambda:ap-south-1:123456789012:function:{lambda_function_name}'  # Modify region and account
+
+#     create_bucket(bucket_name, 'ap-south-1')
+#     add_lambda_permission(lambda_function_name, bucket_name)
+#     configure_s3_event_notification(bucket_name, lambda_function_arn)
+#     upload_file(s3, bucket_name, file_path)
+
+
+
+
+
+
+# import boto3
+# import botocore
+# from botocore.exceptions import ClientError
+# import random
+# import argparse
+# import logging
+# import os
+
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# logger = logging.getLogger(__name__)
+
+# s3 = boto3.client('s3')
+# bucket_name = None
+
+# def create_bucket(bucket_name, region):
+#     """
+#     Creates an S3 bucket if it does not exist.
+#     Returns True if the bucket was created, False if it already existed.
+#     """
+#     try:
+#         s3.head_bucket(Bucket=bucket_name)
+#         logging.info(f"Bucket '{bucket_name}' already exists.")
+#         return False
+#     except ClientError as e:
+#         if e.response['Error']['Code'] == '404':
+#             logging.info(f"Bucket '{bucket_name}' does not exist. Creating now...")
+#             s3.create_bucket(
+#                 Bucket=bucket_name,
+#                 CreateBucketConfiguration={'LocationConstraint': region}
+#             )
+#             return True
+#         else:
+#             logging.error(f"Error checking or creating bucket: {e}")
+#             raise e
+
+# def upload_file(s3_client, bucket_name, file_path):
+#     file_name = os.path.basename(file_path)
+#     try:
+#         s3_client.upload_file(file_path, bucket_name, file_name)
+#         logger.info(f"File '{file_name}' uploaded successfully to bucket '{bucket_name}'.")
+#     except botocore.exceptions.ClientError as e:
+#         logger.error(f"Failed to upload file '{file_name}' to bucket '{bucket_name}': {e}")
+#         raise
+
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser(description="Create an S3 bucket and upload a file.")
+#     parser.add_argument('--bucket', required=True, help='S3 bucket name')
+#     parser.add_argument('--file', required=True, help='Path to the file to upload')
+
+#     args = parser.parse_args()
+#     bucket_name = args.bucket
+#     file_path = args.file
+
+#     create_bucket(bucket_name, 'ap-south-1')
+#     upload_file(s3, bucket_name, file_path)
+
+
+
+
+
