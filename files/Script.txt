@@ -1,3 +1,271 @@
+import boto3
+import os
+import json
+import zipfile
+import argparse
+import subprocess
+from botocore.exceptions import ClientError
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def create_bucket(bucket_name, region='ap-south-1'):
+    s3 = boto3.client('s3', region_name=region, verify=False)
+    try:
+        s3.head_bucket(Bucket=bucket_name)
+        print(f"Bucket {bucket_name} already exists.")
+    except ClientError:
+        s3.create_bucket(
+            Bucket=bucket_name,
+            CreateBucketConfiguration={'LocationConstraint': region}
+        )
+        print(f"Bucket {bucket_name} created.")
+
+def create_sqs_queue(queue_name='S3FileEventsQueue', region='ap-south-1', bucket_name=None):
+    sqs = boto3.client('sqs', region_name=region, verify=False)
+
+    # Create the queue
+    response = sqs.create_queue(QueueName=queue_name)
+    queue_url = response['QueueUrl']
+
+    # Get queue ARN
+    attrs = sqs.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['QueueArn'])
+    queue_arn = attrs['Attributes']['QueueArn']
+
+    if bucket_name:
+        # Attach a policy to allow S3 to send messages
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "AllowS3ToSendMessage",
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": "SQS:SendMessage",
+                    "Resource": queue_arn,
+                    "Condition": {
+                        "ArnEquals": {
+                            "aws:SourceArn": f"arn:aws:s3:::{bucket_name}"
+                        }
+                    }
+                }
+            ]
+        }
+        
+        sqs.set_queue_attributes(
+            QueueUrl=queue_url,
+            Attributes={
+                'Policy': json.dumps(policy)
+            }
+        )
+
+        print(f"Attached S3 permission policy to queue {queue_name}")
+
+    print(f"Created SQS Queue: {queue_name}, ARN: {queue_arn}")
+    return queue_arn
+
+
+def update_s3_notification_to_sqs(bucket_name, queue_arn):
+    s3 = boto3.client('s3', region_name='ap-south-1', verify=False)
+    s3.put_bucket_notification_configuration(
+        Bucket=bucket_name,
+        NotificationConfiguration={
+            'QueueConfigurations': [{
+                'QueueArn': queue_arn,
+                'Events': ['s3:ObjectCreated:*']
+            }]
+        }
+    )
+    print(f"Updated bucket {bucket_name} to send events to SQS.")
+
+def add_sqs_trigger_to_lambda(function_name, sqs_arn):
+    lambda_client = boto3.client('lambda', region_name='ap-south-1', verify=False)
+
+    # Check if mapping already exists
+    response = lambda_client.list_event_source_mappings(
+        FunctionName=function_name,
+        EventSourceArn=sqs_arn
+    )
+
+    if response['EventSourceMappings']:
+        print("SQS trigger already exists. Skipping creation.")
+        return
+
+    # Create the mapping if not already present
+    lambda_client.create_event_source_mapping(
+        EventSourceArn=sqs_arn,
+        FunctionName=function_name,
+        BatchSize=1,  # Process one message at a time for better isolation
+        Enabled=True
+    )
+    print(f"Created event source mapping from {sqs_arn} to {function_name}")
+
+def zip_lambda():
+    zip_filename = "lambda_function.zip"
+    with zipfile.ZipFile(zip_filename, 'w') as zipf:
+        zipf.write("lambda_function.py")
+    return zip_filename
+
+def upload_lambda_zip(zip_file, bucket):
+    s3 = boto3.client('s3', verify=False)
+    s3.upload_file(zip_file, bucket, zip_file)
+    print(f"Uploaded Lambda zip to s3://{bucket}/{zip_file}")
+
+def upload_glue_script(bucket):
+    s3 = boto3.client('s3', verify=False)
+    s3.upload_file('glue_script.py', bucket, 'glue-scripts/glue_script.py')
+    print(f"Uploaded Glue script to s3://{bucket}/glue-scripts/glue_script.py")
+
+def create_glue_role(role_name):
+    iam = boto3.client('iam', verify=False)
+    try:
+        iam.get_role(RoleName=role_name)
+        print(f"IAM role {role_name} already exists.")
+    except ClientError:
+        print(f"Creating IAM role: {role_name}")
+        assume_role_policy = {
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": "glue.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+            }]
+        }
+        iam.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(assume_role_policy)
+        )
+        iam.attach_role_policy(RoleName=role_name, PolicyArn='arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole')
+        iam.attach_role_policy(RoleName=role_name, PolicyArn='arn:aws:iam::aws:policy/AmazonS3FullAccess')
+        iam.attach_role_policy(RoleName=role_name, PolicyArn='arn:aws:iam::aws:policy/CloudWatchLogsFullAccess')
+
+def create_glue_job(job_name, role_arn, script_location):
+    glue = boto3.client('glue', verify=False)
+    try:
+        glue.get_job(JobName=job_name)
+        print(f"Glue job {job_name} already exists.")
+    except glue.exceptions.EntityNotFoundException:
+        glue.create_job(
+            Name=job_name,
+            Role=role_arn,
+            Command={
+                'Name': 'glueetl',
+                'ScriptLocation': script_location,
+                'PythonVersion': '3'
+            },
+            GlueVersion='4.0',
+            MaxCapacity=2.0
+        )
+        print(f"Glue job {job_name} created.")
+
+def deploy_cloudformation(user_bucket):
+    print("Deploying CloudFormation stack...")
+    subprocess.run([
+        "aws", "cloudformation", "deploy",
+        "--template-file", "cloudFormation_template.yaml",
+        "--stack-name", "s3-lambda-glue-stack",
+        "--capabilities", "CAPABILITY_NAMED_IAM",
+        "--parameter-overrides",
+        f"LambdaZipS3Bucket=ziplambdacodebucket",
+        f"LambdaZipS3Key=lambda_function.zip",
+        f"UserFileBucket={user_bucket}"
+    ], check=True)
+
+def upload_user_file(bucket, file_path):
+    s3 = boto3.client('s3', verify=False)
+    filename = os.path.basename(file_path)
+    s3.upload_file(file_path, bucket, filename)
+    print(f"Uploaded file {filename} to bucket {bucket}")
+
+def populate_dynamodb_table():
+    dynamodb = boto3.resource('dynamodb', region_name='ap-south-1', verify=False)
+    table = dynamodb.Table('GlueJobConfig')
+    items = [
+        {"fileType": "txt", "jobName": "MyTxtGlueJob"},
+        {"fileType": "csv", "jobName": "MyCsvGlueJob"},
+    ]
+    for item in items:
+        try:
+            table.put_item(Item=item)
+            print(f"Inserted item: {item}")
+        except Exception as e:
+            print(f"Error inserting item {item}: {e}")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--bucket-name', required=True)
+    parser.add_argument('--file-path', required=True)
+    args = parser.parse_args()
+
+    region = 'ap-south-1'
+    user_bucket = args.bucket_name
+    zip_bucket = 'ziplambdacodebucket'
+    glue_script_bucket = zip_bucket
+    glue_script_key = 'glue-scripts/glue_script.py'
+    glue_script_location = f's3://{glue_script_bucket}/{glue_script_key}'
+
+    create_bucket(zip_bucket, region)
+    create_bucket(user_bucket, region)
+
+    # SQS and notification setup
+    sqs_arn = create_sqs_queue(bucket_name=user_bucket)
+    update_s3_notification_to_sqs(user_bucket, sqs_arn)
+    
+
+    zip_file = zip_lambda()
+    upload_lambda_zip(zip_file, zip_bucket)
+    upload_glue_script(glue_script_bucket)
+
+    create_glue_role("MyGlueServiceRole")
+    role_arn = f"arn:aws:iam::640983357689:role/MyGlueServiceRole"
+
+    create_glue_job("MyTxtGlueJob", role_arn, glue_script_location)
+    create_glue_job("MyCsvGlueJob", role_arn, glue_script_location)
+
+    deploy_cloudformation(user_bucket)
+    add_sqs_trigger_to_lambda('FileTypeDispatcherFunction', sqs_arn)
+
+
+    upload_user_file(user_bucket, args.file_path)
+    populate_dynamodb_table()
+
+    # s3 = boto3.client('s3', region_name='ap-south-1', verify=False)
+    # response = s3.get_bucket_notification_configuration(Bucket='mybucketanushka071611')
+    # print(response)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # import boto3
 # import botocore
 # from botocore.exceptions import ClientError

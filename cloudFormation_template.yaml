@@ -4,15 +4,23 @@ Description: S3 to Lambda to Glue Pipeline
 Parameters:
   LambdaZipS3Bucket:
     Type: String
-    Description: Bucket containing the Lambda function zip
-  LambdaZipS3Key:
+    Description: S3 bucket containing the Lambda function zip files
+
+  DispatcherZipS3Key:
     Type: String
-    Description: Key of the Lambda zip file in the S3 bucket
+    Description: S3 key for the file type dispatcher Lambda zip
+
+  SuccessHandlerZipS3Key:
+    Type: String
+    Description: S3 key for the Glue success handler Lambda zip
+
   UserFileBucket:
     Type: String
     Description: Name of the user file upload bucket
 
 Resources:
+
+  # IAM Role for FileTypeDispatcher Lambda
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -22,14 +30,16 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: lambda.amazonaws.com
+              Service:
+                - lambda.amazonaws.com
+                - glue.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/AmazonS3FullAccess
         - arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess
       Policies:
-        - PolicyName: LambdaBasicExecution
+        - PolicyName: LambdaExtendedPermissions
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -41,8 +51,15 @@ Resources:
                   - s3:*
                   - dynamodb:*
                   - glue:StartJobRun
+                  - glue:StartCrawler
+                  - glue:GetCrawler
+                  - glue:GetCrawlerMetrics
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
                 Resource: "*"
 
+  # Lambda: FileTypeDispatcherFunction
   LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -53,7 +70,7 @@ Resources:
       Timeout: 30
       Code:
         S3Bucket: !Ref LambdaZipS3Bucket
-        S3Key: !Ref LambdaZipS3Key
+        S3Key: !Ref DispatcherZipS3Key
       Environment:
         Variables:
           TABLE_NAME: GlueJobConfig
@@ -67,6 +84,7 @@ Resources:
       Principal: s3.amazonaws.com
       SourceArn: !Sub arn:aws:s3:::${UserFileBucket}
 
+  # DynamoDB Table
   GlueJobConfigTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -79,10 +97,173 @@ Resources:
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
 
+  # Glue Database
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: processed_data_db
+
+  # Glue Crawlers
+  MyCsvGlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: MyCsvGlueCrawler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      TablePrefix: csv_
+      Targets:
+        S3Targets:
+          - Path: s3://outputathenabucket071611/athena-results/csv/
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+
+  MyTxtGlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: MyTxtGlueCrawler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      TablePrefix: txt_
+      Targets:
+        S3Targets:
+          - Path: s3://outputathenabucket071611/athena-results/txt/
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+
+  # GlueSuccessHandler IAM Role
+  GlueSuccessHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GlueSuccessHandlerRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: GlueSuccessHandlerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - glue:StartCrawler
+                  - glue:GetCrawler
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - athena:StartQueryExecution
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - arn:aws:s3:::outputathenabucket071611/
+                  - arn:aws:s3:::outputathenabucket071611/*
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:CreateTable
+                  - glue:GetDatabase
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                  - glue:GetDatabases
+                Resource: "*"
+
+  # Lambda: GlueSuccessHandler
+  GlueSuccessHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GlueSuccessHandler
+      Handler: glue_success_handler.lambda_handler
+      Role: !GetAtt GlueSuccessHandlerRole.Arn
+      Runtime: python3.9
+      Timeout: 60
+      Code:
+        S3Bucket: !Ref LambdaZipS3Bucket
+        S3Key: !Ref SuccessHandlerZipS3Key
+      Environment:
+        Variables:
+          TABLE_NAME: GlueJobConfig
+          BUCKET_NAME: !Ref UserFileBucket
+          ATHENA_OUTPUT_BUCKET: !Ref UserFileBucket
+
+  # EventBridge Rule
+  GlueJobStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: GlueJobStateChangeRule
+      Description: Trigger Lambda on Glue job state change (SUCCEEDED/FAILED)
+      EventPattern:
+        source:
+          - aws.glue
+        detail-type:
+          - Glue Job State Change
+        detail:
+          state:
+            - SUCCEEDED
+            - FAILED
+      Targets:
+        - Arn: !GetAtt GlueSuccessHandlerFunction.Arn
+          Id: GlueSuccessHandlerTarget
+
+  # Allow EventBridge to Invoke GlueSuccessHandler Lambda
+  EventBridgeInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GlueSuccessHandlerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GlueJobStateChangeRule.Arn
+
+  AthenaS3WritePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AthenaS3WritePolicy
+      Roles:
+        - !Ref GlueSuccessHandlerRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: "s3:PutObject"
+            Resource: arn:aws:s3:::outputathenabucket071611/athena-results/*
+
+
 Outputs:
   LambdaFunctionArn:
-    Description: ARN of the Lambda function
+    Description: ARN of the FileTypeDispatcher Lambda function
     Value: !GetAtt LambdaFunction.Arn
+
+  GlueSuccessHandlerArn:
+    Description: ARN of the GlueSuccessHandler Lambda function
+    Value: !GetAtt GlueSuccessHandlerFunction.Arn
+
   DynamoDBTableName:
     Description: Name of the DynamoDB table
     Value: !Ref GlueJobConfigTable
+
+  GlueDatabaseName:
+    Description: Name of the Glue database
+    Value: !Ref GlueDatabase
+
+  EventBridgeRuleArn:
+    Description: ARN of the EventBridge rule
+    Value: !GetAtt GlueJobStateChangeRule.Arn

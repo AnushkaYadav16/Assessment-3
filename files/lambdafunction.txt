@@ -1,0 +1,48 @@
+import json
+import boto3
+import logging
+
+# Set up logging configuration
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
+# Initialize AWS SDK clients
+dynamodb = boto3.resource('dynamodb')
+glue = boto3.client('glue')
+
+def lambda_handler(event, context):
+    """
+    Lambda function handler that processes S3 event notifications and triggers Glue jobs
+    based on the file type.
+
+    Parameters:
+    event (dict): The event data passed to the Lambda function.
+    context (object): The runtime information of the Lambda function.
+    """
+    table = dynamodb.Table('GlueJobConfig')
+    
+    for record in event['Records']:
+        bucket = record['s3']['bucket']['name']
+        key = record['s3']['object']['key']
+        file_type = key.split('.')[-1]
+        size = record['s3']['object'].get('size', 0)
+
+        # Log received event data
+        logger.info(f"Processing file from bucket {bucket}, key: {key}, file type: {file_type}, size: {size} bytes.")
+
+        # Scan DynamoDB for matching job name based on file type
+        response = table.scan(
+            FilterExpression=boto3.dynamodb.conditions.Attr('fileType').eq(file_type)
+        )
+
+        items = response.get('Items', [])
+        
+        if items:
+            job_name = items[0]['jobName']
+            try:
+                glue.start_job_run(JobName=job_name)
+                logger.info(f"Started Glue job: {job_name}")
+            except Exception as e:
+                logger.error(f"Error starting Glue job {job_name}: {e}")
+        else:
+            logger.warning(f"No matching Glue job for file type: {file_type}")
