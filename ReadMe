@@ -1,8 +1,4 @@
 Assessment - 3
 
-Script.py 
-python script.py --bucket mybucket071116 --file C:\Users\anushka.yadav02\Documents\VSCODE\Assessment3\files\Salary.txt 
-
-
-python add_config.py
-python script1.py --bucket mybucket071116 --file C:\Users\anushka.yadav02\Documents\VSCODE\Assessment3\files\Salary.txt --lambda-name s3-trigger
+python script.py --bucket-name mybucketanushka071611 --file-path C:\Users\anushka.yadav02\Documents\VSCODE\Assessment3\files\dept.csv
+aws cloudformation delete-stack --stack-name s3-lambda-glue-stack

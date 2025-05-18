@@ -11,7 +11,6 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
@@ -29,7 +28,6 @@ def create_bucket(bucket_name, region='ap-south-1'):
         )
         logging.info(f"Bucket {bucket_name} created.")
 
-    # Policy definition
     bucket_policy = {
         "Version": "2012-10-17",
         "Statement": [
